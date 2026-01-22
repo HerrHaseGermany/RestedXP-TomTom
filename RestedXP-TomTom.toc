@@ -1,0 +1,9 @@
+## Interface: 11508
+## Title: RestedXP-TomTom
+## Notes: Disables RestedXP arrow and uses TomTom Crazy Arrow instead
+## Author: Hase
+## Version: 1.0
+## Dependencies: RXPGuides, TomTom
+## OptionalDeps: HereBeDragons-2.0
+
+RestedXP-TomTom.lua
