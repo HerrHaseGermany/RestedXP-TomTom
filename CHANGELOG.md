@@ -1,5 +1,8 @@
 ## CHANGELOG
 
+# 1.0.1
+- minor cleanup
+
 # 1.0
 
 - Initial release.
