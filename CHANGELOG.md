@@ -1,5 +1,8 @@
 ## CHANGELOG
 
+# 1.2
+- TBC Compability
+
 # 1.0.1
 - minor cleanup
 
