@@ -1,5 +1,8 @@
 ## CHANGELOG
 
+# 1.2.1
+- Add Logo
+
 # 1.2
 - TBC Compability
 
