@@ -7,6 +7,13 @@ local lastElementId
 local debugEnabled = false
 local tick
 
+local pendingElementKey
+local pendingElement
+local pendingSince
+
+local SWITCH_STABLE_SECONDS = 1.0     -- must remain the same target for this long
+local ARRIVE_DISTANCE = 15            -- yards-ish (TomTom distance), switch immediately if closer than this
+
 local function dbg(fmt, ...)
     if not debugEnabled then
         return
@@ -70,20 +77,28 @@ local function safeDisableRxpArrow()
     end
 end
 
+local function q(n, scale)
+    if type(n) ~= "number" then return 0 end
+    return math.floor(n * scale + 0.5)
+end
+
 local function getElementKey(element)
     if not element then
         return nil
     end
 
-    local zone = element.zone or 0
-    local x = element.x or 0
-    local y = element.y or 0
-    local wx = element.wx or 0
-    local wy = element.wy or 0
-    local inst = element.instance or 0
-    local title = element.title or ""
+    local zone = (type(element.zone) == "number") and element.zone or 0
+    local inst = (type(element.instance) == "number") and element.instance or 0
 
-    return table.concat({ zone, x, y, wx, wy, inst, title }, ":")
+    -- RXP x/y are typically percent (0..100). Quantize to 0.01% to avoid jitter.
+    local x = q(element.x, 100)
+    local y = q(element.y, 100)
+
+    -- World coords can exist too; quantize lightly.
+    local wx = q(element.wx, 1)
+    local wy = q(element.wy, 1)
+
+    return table.concat({ inst, zone, x, y, wx, wy }, ":")
 end
 
 local function clearTomTomWaypoint(tomtom)
@@ -176,25 +191,61 @@ tick = function()
     if not key then
         clearTomTomWaypoint(tomtom)
         lastElementId = nil
+        pendingElementKey = nil
+        pendingElement = nil
+        pendingSince = nil
         return
     end
 
-    local changed = (key ~= lastElementId)
-    if changed then
-        lastElementId = key
-    end
+    local now = GetTime()
 
     local haveWaypoint = ensureTomTomWaypointStillExists(tomtom)
     if not haveWaypoint then
+        lastElementId = key
+        pendingElementKey = nil
+        pendingElement = nil
+        pendingSince = nil
         setTomTomWaypointFromElement(tomtom, element)
         return
     end
 
-    if not changed then
+    -- If arrow target matches what we already committed, clear pending.
+    if key == lastElementId then
+        pendingElementKey = nil
+        pendingElement = nil
+        pendingSince = nil
         return
     end
 
-    setTomTomWaypointFromElement(tomtom, element)
+    -- If we're very close to current waypoint, allow immediate switch
+    if type(tomtom.GetDistanceToWaypoint) == "function" and currentWaypointUid then
+        local ok, dist = pcall(tomtom.GetDistanceToWaypoint, tomtom, currentWaypointUid)
+        if ok and type(dist) == "number" and dist <= ARRIVE_DISTANCE then
+            lastElementId = key
+            pendingElementKey = nil
+            pendingElement = nil
+            pendingSince = nil
+            setTomTomWaypointFromElement(tomtom, element)
+            return
+        end
+    end
+
+    -- Debounce: require the new key to be stable for SWITCH_STABLE_SECONDS
+    if pendingElementKey ~= key then
+        pendingElementKey = key
+        pendingElement = element
+        pendingSince = now
+        return
+    end
+
+    if pendingSince and (now - pendingSince) >= SWITCH_STABLE_SECONDS then
+        lastElementId = pendingElementKey
+        pendingElementKey = nil
+        pendingSince = nil
+
+        setTomTomWaypointFromElement(tomtom, pendingElement or element)
+        pendingElement = nil
+    end
 end
 
 frame:SetScript("OnEvent", function(_, event, arg1)

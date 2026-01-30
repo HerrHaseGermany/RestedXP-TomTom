@@ -1,5 +1,8 @@
 ## CHANGELOG
 
+# 1.2.2
+- improved TBC rapid waypoint switching.
+
 # 1.2.1
 - Add Logo
 
