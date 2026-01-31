@@ -1,5 +1,8 @@
 ## CHANGELOG
 
+# 1.2.3
+- add all active step waypoints to TomTom and stabilize arrow switching.
+
 # 1.2.2
 - improved TBC rapid waypoint switching.
 
