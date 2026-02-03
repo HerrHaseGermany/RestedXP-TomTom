@@ -14,10 +14,12 @@ local pendingElementKey
 local pendingElement
 local pendingSince
 local arrivedCooldownUntil
+local noTargetSince
 
 local SWITCH_STABLE_SECONDS = 1.0     -- must remain the same target for this long
 local ARRIVE_DISTANCE = 15            -- yards-ish (TomTom distance), switch immediately if closer than this
 local SWITCH_DISTANCE_ADVANTAGE = 10  -- require new waypoint to be this much closer to switch
+local NO_TARGET_CLEAR_SECONDS = 1.0   -- avoid flicker when RXP temporarily has no waypoint
 
 local function dbg(fmt, ...)
     if not debugEnabled then
@@ -92,16 +94,22 @@ local function getElementKey(element)
         return nil
     end
 
+    local hasZone = (type(element.zone) == "number") and (type(element.x) == "number") and (type(element.y) == "number")
+    local hasWorld = (type(element.wx) == "number") and (type(element.wy) == "number")
+    if not hasZone and not hasWorld then
+        return nil
+    end
+
     local zone = (type(element.zone) == "number") and element.zone or 0
     local inst = (type(element.instance) == "number") and element.instance or 0
 
     -- RXP x/y are typically percent (0..100). Quantize to 0.01% to avoid jitter.
-    local x = q(element.x, 100)
-    local y = q(element.y, 100)
+    local x = hasZone and q(element.x, 100) or 0
+    local y = hasZone and q(element.y, 100) or 0
 
     -- World coords can exist too; quantize lightly.
-    local wx = q(element.wx, 1)
-    local wy = q(element.wy, 1)
+    local wx = hasWorld and q(element.wx, 1) or 0
+    local wy = hasWorld and q(element.wy, 1) or 0
 
     return table.concat({ inst, zone, x, y, wx, wy }, ":")
 end
@@ -123,12 +131,16 @@ local function isTomTomWaypointValid(tomtom, uid)
     if not uid then
         return false
     end
+    if type(tomtom.IsValidWaypoint) == "function" then
+        local ok, valid = pcall(tomtom.IsValidWaypoint, tomtom, uid)
+        return ok and valid
+    end
     if type(tomtom.GetDistanceToWaypoint) ~= "function" then
         return true
     end
 
-    local ok, dist = pcall(tomtom.GetDistanceToWaypoint, tomtom, uid)
-    return ok and dist ~= nil
+    local ok = pcall(tomtom.GetDistanceToWaypoint, tomtom, uid)
+    return ok
 end
 
 local function addTomTomWaypointFromElement(tomtom, element, opts)
@@ -285,18 +297,27 @@ tick = function()
 
     safeDisableRxpArrow()
 
+    local now = GetTime()
+
     local element = arrowFrame.element
     local key = getElementKey(element)
     if not key then
-        clearTomTomWaypoints(tomtom)
-        currentStepKey = nil
-        pendingElementKey = nil
-        pendingElement = nil
-        pendingSince = nil
+        if not noTargetSince then
+            noTargetSince = now
+        end
+        if (now - noTargetSince) >= NO_TARGET_CLEAR_SECONDS then
+            clearTomTomWaypoints(tomtom)
+            currentStepKey = nil
+            pendingElementKey = nil
+            pendingElement = nil
+            pendingSince = nil
+            arrivedCooldownUntil = nil
+            noTargetSince = nil
+        end
         return
     end
 
-    local now = GetTime()
+    noTargetSince = nil
 
     local stepKey = getStepKey(element.step)
     if stepKey ~= currentStepKey then
@@ -331,6 +352,22 @@ tick = function()
             stepWaypointUids[ckey] = nil
             stepWaypointElements[ckey] = nil
         end
+    end
+
+    if not next(stepWaypointUids) then
+        if not noTargetSince then
+            noTargetSince = now
+        end
+        if (now - noTargetSince) >= NO_TARGET_CLEAR_SECONDS then
+            clearTomTomWaypoints(tomtom)
+            currentStepKey = nil
+            pendingElementKey = nil
+            pendingElement = nil
+            pendingSince = nil
+            arrivedCooldownUntil = nil
+            noTargetSince = nil
+        end
+        return
     end
 
     if currentWaypointUid and not isTomTomWaypointValid(tomtom, currentWaypointUid) then
