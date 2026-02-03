@@ -1,7 +1,7 @@
 ## CHANGELOG
 
 # 1.2.4
-- fix handling of invalid waypoints
+- fix handling of unavailable waypoints
 
 # 1.2.3
 - add all active step waypoints to TomTom and stabilize arrow switching.
