@@ -1,5 +1,8 @@
 ## CHANGELOG
 
+# 1.2.5
+- license update
+
 # 1.2.4
 - fix handling of unavailable waypoints
 
