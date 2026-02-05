@@ -1,5 +1,8 @@
 ## CHANGELOG
 
+# 1.2.6
+- added a handler to run when you regain control after tax
+
 # 1.2.5
 - license update
 

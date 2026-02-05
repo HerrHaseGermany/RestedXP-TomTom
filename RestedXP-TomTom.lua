@@ -515,8 +515,14 @@ frame:SetScript("OnEvent", function(_, event, arg1)
 
     if event == "ADDON_LOADED" and (arg1 == "RXPGuides" or arg1 == "TomTom") then
         tick()
+        return
+    end
+
+    if event == "PLAYER_CONTROL_GAINED" then
+        tick()
     end
 end)
 
 frame:RegisterEvent("PLAYER_LOGIN")
 frame:RegisterEvent("ADDON_LOADED")
+frame:RegisterEvent("PLAYER_CONTROL_GAINED")

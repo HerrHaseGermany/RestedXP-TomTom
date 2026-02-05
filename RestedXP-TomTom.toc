@@ -2,7 +2,7 @@
 ## Title: RestedXP-TomTom
 ## Notes: Disables RestedXP arrow and uses TomTom Crazy Arrow instead
 ## Author: Hase
-## Version: 1.2.5
+## Version: 1.2.6
 ## Dependencies: RXPGuides, TomTom
 ## OptionalDeps: HereBeDragons-2.0
 ## IconTexture: Interface/AddOns/RestedXP-TomTom/Media/logo.blp
