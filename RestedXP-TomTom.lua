@@ -501,6 +501,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
             end
             DEFAULT_CHAT_FRAME:AddMessage(string.format("|cffffd200%s:|r hint=auto-updates from RestedXP arrow target", addonName))
         end
+        msg("For the best experience, make sure to keep your RestedXP Guides up to date.")
 
         frame:SetScript("OnUpdate", function(_, elapsed)
             frame._t = (frame._t or 0) + elapsed

@@ -1,5 +1,8 @@
 ## CHANGELOG
 
+# 1.2.7
+- added loading message
+
 # 1.2.6
 - added a handler to run when you regain control after tax
 
