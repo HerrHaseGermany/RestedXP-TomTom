@@ -47,6 +47,18 @@ local function getRxpArrowFrame()
     end
 end
 
+local function getRxpDebugState()
+    local dbg = _G.RXPTOMTOM_DEBUG
+    if type(dbg) == "table" then
+        return dbg
+    end
+end
+
+local function isRxpArrowAllowed()
+    local dbg = getRxpDebugState()
+    return dbg and dbg.allowRxpArrow
+end
+
 local function ensureTomTom()
     local tt = _G.TomTom
     if type(tt) == "table" and type(tt.AddWaypoint) == "function" and type(tt.RemoveWaypoint) == "function" then
@@ -60,29 +72,48 @@ local function safeDisableRxpArrow()
         return
     end
 
-    arrowFrame:Hide()
-    arrowFrame:SetScript("OnUpdate", nil)
-
     if not arrowFrame.__rxptt_hooked then
         arrowFrame.__rxptt_hooked = true
 
         local originalShow = arrowFrame.Show
+        arrowFrame.__rxptt_originalShow = originalShow
         arrowFrame.Show = function(self, ...)
             if type(originalShow) == "function" then
                 originalShow(self, ...)
             end
-            self:Hide()
+            if not isRxpArrowAllowed() then
+                self:Hide()
+            end
         end
 
         local originalSetShown = arrowFrame.SetShown
+        arrowFrame.__rxptt_originalSetShown = originalSetShown
         arrowFrame.SetShown = function(self, shown)
             if type(originalSetShown) == "function" then
                 originalSetShown(self, shown)
             end
-            self:Hide()
+            if not isRxpArrowAllowed() then
+                self:Hide()
+            end
         end
+
+        arrowFrame.__rxptt_originalOnUpdate = arrowFrame:GetScript("OnUpdate")
     end
+
+    if isRxpArrowAllowed() then
+        local originalOnUpdate = arrowFrame.__rxptt_originalOnUpdate
+        if originalOnUpdate then
+            arrowFrame:SetScript("OnUpdate", originalOnUpdate)
+        end
+        arrowFrame:Show()
+        return
+    end
+
+    arrowFrame:Hide()
+    arrowFrame:SetScript("OnUpdate", nil)
 end
+
+_G.RXPTOMTOM_ApplyRxpArrowState = safeDisableRxpArrow
 
 local function q(n, scale)
     if type(n) ~= "number" then return 0 end

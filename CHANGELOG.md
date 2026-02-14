@@ -1,5 +1,8 @@
 ## CHANGELOG
 
+# 1.2.8
+- Small changes to improve debugging on the developer side
+
 # 1.2.7
 - added loading message
 
