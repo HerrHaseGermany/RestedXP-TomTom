@@ -100,17 +100,24 @@ local function safeDisableRxpArrow()
         arrowFrame.__rxptt_originalOnUpdate = arrowFrame:GetScript("OnUpdate")
     end
 
+    local originalOnUpdate = arrowFrame.__rxptt_originalOnUpdate
+    if originalOnUpdate then
+        arrowFrame:SetScript("OnUpdate", originalOnUpdate)
+    end
+
     if isRxpArrowAllowed() then
-        local originalOnUpdate = arrowFrame.__rxptt_originalOnUpdate
-        if originalOnUpdate then
-            arrowFrame:SetScript("OnUpdate", originalOnUpdate)
+        if type(arrowFrame.SetAlpha) == "function" then
+            arrowFrame:SetAlpha(1)
         end
         arrowFrame:Show()
         return
     end
 
-    arrowFrame:Hide()
-    arrowFrame:SetScript("OnUpdate", nil)
+    -- Keep the frame alive so RestedXP continues updating its element.
+    if type(arrowFrame.SetAlpha) == "function" then
+        arrowFrame:SetAlpha(0)
+    end
+    arrowFrame:Show()
 end
 
 _G.RXPTOMTOM_ApplyRxpArrowState = safeDisableRxpArrow
@@ -350,148 +357,26 @@ tick = function()
 
     noTargetSince = nil
 
-    local stepKey = getStepKey(element.step)
-    if stepKey ~= currentStepKey then
-        clearTomTomWaypoints(tomtom)
-        currentStepKey = stepKey
-        pendingElementKey = nil
-        pendingElement = nil
-        pendingSince = nil
-        arrivedCooldownUntil = nil
-    end
-
-    local candidates = collectStepWaypoints(element)
-    local desiredKeys = {}
-    for _, candidate in ipairs(candidates) do
-        local ckey = candidate.wpHash or getElementKey(candidate)
-        if ckey and not desiredKeys[ckey] then
-            desiredKeys[ckey] = true
-            stepWaypointElements[ckey] = candidate
-            local existing = stepWaypointUids[ckey]
-            if not isTomTomWaypointValid(tomtom, existing) then
-                local uid = addTomTomWaypointFromElement(tomtom, candidate, { crazy = false })
-                if uid then
-                    stepWaypointUids[ckey] = uid
-                end
-            end
-        end
-    end
-
-    for ckey, uid in pairs(stepWaypointUids) do
-        if not desiredKeys[ckey] then
-            pcall(tomtom.RemoveWaypoint, tomtom, uid)
-            stepWaypointUids[ckey] = nil
-            stepWaypointElements[ckey] = nil
-        end
-    end
-
-    if not next(stepWaypointUids) then
-        if not noTargetSince then
-            noTargetSince = now
-        end
-        if (now - noTargetSince) >= NO_TARGET_CLEAR_SECONDS then
-            clearTomTomWaypoints(tomtom)
-            currentStepKey = nil
-            pendingElementKey = nil
-            pendingElement = nil
-            pendingSince = nil
-            arrivedCooldownUntil = nil
-            noTargetSince = nil
-        end
-        return
-    end
-
-    if currentWaypointUid and not isTomTomWaypointValid(tomtom, currentWaypointUid) then
-        currentWaypointUid = nil
-        currentWaypointKey = nil
-    end
-
-    local currentDist
-    if currentWaypointUid and type(tomtom.GetDistanceToWaypoint) == "function" then
-        local ok, dist = pcall(tomtom.GetDistanceToWaypoint, tomtom, currentWaypointUid)
-        if ok and type(dist) == "number" then
-            currentDist = dist
-        end
-    end
-
-    if currentDist and currentDist <= ARRIVE_DISTANCE then
-        arrivedCooldownUntil = now + 1.5
-    end
-
-    local excludeKey = currentWaypointKey
-    if arrivedCooldownUntil and now <= arrivedCooldownUntil then
-        excludeKey = currentWaypointKey
-    else
-        excludeKey = nil
-    end
-    local bestKey, bestDist = selectBestWaypointKey(tomtom, desiredKeys, excludeKey)
-    if not bestKey then
-        return
-    end
-
-    local bestUid = stepWaypointUids[bestKey]
+    local elementKey = element.wpHash or key
     local arrivalDist = (tomtom.profile and tomtom.profile.arrow and tomtom.profile.arrow.arrival) or 0
 
-    if not currentWaypointKey or not currentWaypointUid then
-        currentWaypointKey = bestKey
-        currentWaypointUid = bestUid
-        if bestUid and type(tomtom.SetCrazyArrow) == "function" then
-            pcall(tomtom.SetCrazyArrow, tomtom, bestUid, arrivalDist, bestUid.title)
+    if currentWaypointKey and currentWaypointKey ~= elementKey then
+        clearTomTomWaypoints(tomtom)
+    end
+
+    if currentWaypointUid and isTomTomWaypointValid(tomtom, currentWaypointUid) and currentWaypointKey == elementKey then
+        if type(tomtom.SetCrazyArrow) == "function" then
+            pcall(tomtom.SetCrazyArrow, tomtom, currentWaypointUid, arrivalDist, currentWaypointUid.title)
         end
-        pendingElementKey = nil
-        pendingElement = nil
-        pendingSince = nil
         return
     end
 
-    if bestKey == currentWaypointKey then
-        pendingElementKey = nil
-        pendingElement = nil
-        pendingSince = nil
-        return
-    end
-
-    -- Prevent snapping back unless new target is meaningfully closer
-    if currentDist and bestDist and (bestDist + SWITCH_DISTANCE_ADVANTAGE) > currentDist then
-        pendingElementKey = nil
-        pendingElement = nil
-        pendingSince = nil
-        return
-    end
-
-    -- If we're very close to current waypoint, allow immediate switch
-    if type(tomtom.GetDistanceToWaypoint) == "function" and currentWaypointUid then
-        local ok, dist = pcall(tomtom.GetDistanceToWaypoint, tomtom, currentWaypointUid)
-        if ok and type(dist) == "number" and dist <= ARRIVE_DISTANCE then
-            currentWaypointKey = bestKey
-            currentWaypointUid = bestUid
-            pendingElementKey = nil
-            pendingElement = nil
-            pendingSince = nil
-            if bestUid and type(tomtom.SetCrazyArrow) == "function" then
-                pcall(tomtom.SetCrazyArrow, tomtom, bestUid, arrivalDist, bestUid.title)
-            end
-            return
-        end
-    end
-
-    -- Debounce: require the new key to be stable for SWITCH_STABLE_SECONDS
-    if pendingElementKey ~= bestKey then
-        pendingElementKey = bestKey
-        pendingElement = stepWaypointElements[bestKey] or element
-        pendingSince = now
-        return
-    end
-
-    if pendingSince and (now - pendingSince) >= SWITCH_STABLE_SECONDS then
-        currentWaypointKey = bestKey
-        currentWaypointUid = bestUid
-        pendingElementKey = nil
-        pendingSince = nil
-        pendingElement = nil
-
-        if bestUid and type(tomtom.SetCrazyArrow) == "function" then
-            pcall(tomtom.SetCrazyArrow, tomtom, bestUid, arrivalDist, bestUid.title)
+    local uid = addTomTomWaypointFromElement(tomtom, element, { crazy = false })
+    if uid then
+        currentWaypointKey = elementKey
+        currentWaypointUid = uid
+        if type(tomtom.SetCrazyArrow) == "function" then
+            pcall(tomtom.SetCrazyArrow, tomtom, uid, arrivalDist, uid.title)
         end
     end
 end
@@ -542,6 +427,26 @@ frame:SetScript("OnEvent", function(_, event, arg1)
             frame._t = 0
             tick()
         end)
+
+        -- RXP can populate the arrow element after login; retry for a bit until it exists.
+        if type(C_Timer) == "table" and type(C_Timer.NewTicker) == "function" then
+            local attempts = 0
+            local ticker
+            ticker = C_Timer.NewTicker(0.5, function()
+                attempts = attempts + 1
+                tick()
+                local af = getRxpArrowFrame()
+                if (af and af.element) or attempts >= 20 then
+                    if ticker and type(ticker.Cancel) == "function" then
+                        ticker:Cancel()
+                    end
+                end
+            end)
+        elseif type(C_Timer) == "table" and type(C_Timer.After) == "function" then
+            C_Timer.After(0.5, tick)
+            C_Timer.After(1.5, tick)
+            C_Timer.After(2.5, tick)
+        end
         return
     end
 
@@ -550,7 +455,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         return
     end
 
-    if event == "PLAYER_CONTROL_GAINED" then
+    if event == "PLAYER_CONTROL_GAINED" or event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_ALIVE" then
         tick()
     end
 end)
@@ -558,3 +463,5 @@ end)
 frame:RegisterEvent("PLAYER_LOGIN")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_CONTROL_GAINED")
+frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+frame:RegisterEvent("PLAYER_ALIVE")

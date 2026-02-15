@@ -1,5 +1,8 @@
 ## CHANGELOG
 
+# 1.3
+- improved waypoint tracking
+
 # 1.2.8
 - Small changes to improve debugging on the developer side
 
