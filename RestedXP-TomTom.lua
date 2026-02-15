@@ -149,6 +149,16 @@ local function q(n, scale)
     return math.floor(n * scale + 0.5)
 end
 
+local function getStepKey(step)
+    if not step then
+        return nil
+    end
+    if step.index ~= nil then
+        return tostring(step.index)
+    end
+    return tostring(step)
+end
+
 local function getElementKey(element)
     if not element then
         return nil
@@ -209,6 +219,25 @@ local function clearTomTomWaypoints(tomtom)
     currentWaypointKey = nil
     currentOptionsKey = nil
     lastElementSignature = nil
+end
+
+local function clearWaypointByUid(tomtom, uid)
+    if not (tomtom and uid) then
+        return
+    end
+    pcall(tomtom.RemoveWaypoint, tomtom, uid)
+end
+
+local function clearStepWaypoint(tomtom, stepKey)
+    if not stepKey then
+        return
+    end
+    local uid = stepWaypointUids[stepKey]
+    if uid then
+        clearWaypointByUid(tomtom, uid)
+    end
+    stepWaypointUids[stepKey] = nil
+    stepWaypointElements[stepKey] = nil
 end
 
 local function isTomTomWaypointValid(tomtom, uid)
@@ -285,6 +314,14 @@ local function addTomTomWaypointFromElement(tomtom, element, opts)
     local uid = tomtom:AddWaypoint(map, x, y, waypointOpts)
 
     dbg("Add TomTom waypoint: map=%s x=%.4f y=%.4f title=%s", tostring(map), x, y, tostring(title))
+
+    if uid and element.step and element.step.index ~= nil then
+        local stepKey = getStepKey(element.step)
+        if stepKey then
+            stepWaypointUids[stepKey] = uid
+            stepWaypointElements[stepKey] = element
+        end
+    end
     return uid
 end
 
@@ -395,16 +432,6 @@ local function ensureRxpMenuHook()
             injectMenuItem(menu, frame)
         end)
     end
-end
-
-local function getStepKey(step)
-    if not step then
-        return nil
-    end
-    if step.index ~= nil then
-        return tostring(step.index)
-    end
-    return tostring(step)
 end
 
 local function collectStepWaypoints(arrowElement)
@@ -523,6 +550,12 @@ tick = function()
     end
 
     local elementKey = element.wpHash or signature
+    local stepKey = (element and element.step) and getStepKey(element.step) or nil
+
+    if stepKey and currentStepKey and stepKey ~= currentStepKey then
+        clearStepWaypoint(tomtom, currentStepKey)
+    end
+    currentStepKey = stepKey
 
     if lastElementSignature and lastElementSignature == signature and currentWaypointUid and currentWaypointKey == elementKey then
         return
@@ -530,7 +563,10 @@ tick = function()
     local arrivalDist = (tomtom.profile and tomtom.profile.arrow and tomtom.profile.arrow.arrival) or 0
 
     if currentWaypointKey and currentWaypointKey ~= elementKey then
-        clearTomTomWaypoints(tomtom)
+        clearWaypointByUid(tomtom, currentWaypointUid)
+        currentWaypointUid = nil
+        currentWaypointKey = nil
+        lastElementSignature = nil
     end
 
     local uid = addTomTomWaypointFromElement(tomtom, element, { crazy = false })

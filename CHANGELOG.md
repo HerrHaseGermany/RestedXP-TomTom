@@ -1,5 +1,8 @@
 ## CHANGELOG
 
+# 1.3.1
+- improved waypoint clearing
+
 # 1.3
 - improved waypoint tracking
 - added Optionsmenu
