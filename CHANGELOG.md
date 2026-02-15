@@ -2,6 +2,8 @@
 
 # 1.3
 - improved waypoint tracking
+- added Optionsmenu
+- added optional TomTom-Waypoints on Minimap and/or Worldmap
 
 # 1.2.8
 - Small changes to improve debugging on the developer side

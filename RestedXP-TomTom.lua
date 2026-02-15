@@ -9,6 +9,26 @@ local stepWaypointUids = {}
 local stepWaypointElements = {}
 local debugEnabled = false
 local tick
+local currentOptionsKey
+
+local defaults = {
+    showWorldMap = false,
+    showMinimap = false,
+}
+
+local function getConfig()
+    if type(_G.RXPTT_DB) ~= "table" then
+        _G.RXPTT_DB = {}
+    end
+    local db = _G.RXPTT_DB
+    if db.showWorldMap == nil then
+        db.showWorldMap = defaults.showWorldMap
+    end
+    if db.showMinimap == nil then
+        db.showMinimap = defaults.showMinimap
+    end
+    return db
+end
 
 local pendingElementKey
 local pendingElement
@@ -163,6 +183,7 @@ local function clearTomTomWaypoints(tomtom)
     stepWaypointElements = {}
     currentWaypointUid = nil
     currentWaypointKey = nil
+    currentOptionsKey = nil
 end
 
 local function isTomTomWaypointValid(tomtom, uid)
@@ -228,6 +249,9 @@ local function addTomTomWaypointFromElement(tomtom, element, opts)
         persistent = false,
         silent = true,
     }
+    local db = getConfig()
+    waypointOpts.minimap = db.showMinimap and true or false
+    waypointOpts.world = db.showWorldMap and true or false
     if opts then
         if opts.minimap ~= nil then waypointOpts.minimap = opts.minimap end
         if opts.world ~= nil then waypointOpts.world = opts.world end
@@ -357,6 +381,13 @@ tick = function()
 
     noTargetSince = nil
 
+    local db = getConfig()
+    local optionsKey = (db.showWorldMap and "1" or "0") .. (db.showMinimap and "1" or "0")
+    if currentOptionsKey ~= optionsKey then
+        clearTomTomWaypoints(tomtom)
+        currentOptionsKey = optionsKey
+    end
+
     local elementKey = element.wpHash or key
     local arrivalDist = (tomtom.profile and tomtom.profile.arrow and tomtom.profile.arrow.arrival) or 0
 
@@ -383,9 +414,95 @@ end
 
 frame:SetScript("OnEvent", function(_, event, arg1)
     if event == "PLAYER_LOGIN" then
+        local function createOptionsPanel()
+            local panel = CreateFrame("Frame", "RXPTOMTOM_OptionsPanel", UIParent)
+            panel.name = "RestedXP-TomTom"
+
+            local title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+            title:SetPoint("TOPLEFT", 16, -16)
+            title:SetText("RestedXP-TomTom")
+
+            local subtitle = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+            subtitle:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -8)
+            subtitle:SetText("TomTom waypoint display options")
+
+            local worldCheck = CreateFrame("CheckButton", nil, panel, "InterfaceOptionsCheckButtonTemplate")
+            worldCheck:SetPoint("TOPLEFT", subtitle, "BOTTOMLEFT", 0, -12)
+            worldCheck.Text:SetText("Show waypoint on world map")
+
+            local minimapCheck = CreateFrame("CheckButton", nil, panel, "InterfaceOptionsCheckButtonTemplate")
+            minimapCheck:SetPoint("TOPLEFT", worldCheck, "BOTTOMLEFT", 0, -8)
+            minimapCheck.Text:SetText("Show waypoint on minimap")
+
+            local reloadBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+            reloadBtn:SetSize(140, 22)
+            reloadBtn:SetPoint("TOPLEFT", minimapCheck, "BOTTOMLEFT", 0, -12)
+            reloadBtn:SetText("Reload to apply")
+
+            panel.refresh = function()
+                local db = getConfig()
+                worldCheck:SetChecked(db.showWorldMap)
+                minimapCheck:SetChecked(db.showMinimap)
+            end
+            panel:SetScript("OnShow", panel.refresh)
+
+            worldCheck:SetScript("OnClick", function(self)
+                local db = getConfig()
+                db.showWorldMap = self:GetChecked() and true or false
+                local tt = ensureTomTom()
+                if tt then
+                    clearTomTomWaypoints(tt)
+                end
+                currentOptionsKey = nil
+                tick()
+            end)
+
+            minimapCheck:SetScript("OnClick", function(self)
+                local db = getConfig()
+                db.showMinimap = self:GetChecked() and true or false
+                local tt = ensureTomTom()
+                if tt then
+                    clearTomTomWaypoints(tt)
+                end
+                currentOptionsKey = nil
+                tick()
+            end)
+
+            reloadBtn:SetScript("OnClick", function()
+                if type(ReloadUI) == "function" then
+                    ReloadUI()
+                end
+            end)
+
+            if type(Settings) == "table" and type(Settings.RegisterCanvasLayoutCategory) == "function" then
+                local category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
+                Settings.RegisterAddOnCategory(category)
+            elseif type(InterfaceOptions_AddCategory) == "function" then
+                InterfaceOptions_AddCategory(panel)
+            elseif type(InterfaceOptionsFrameAddCategory) == "function" then
+                InterfaceOptionsFrameAddCategory(panel)
+            end
+
+            _G.RXPTOMTOM_OptionsPanel = panel
+        end
+
+        createOptionsPanel()
+
         SLASH_RXPTOMTOM1 = "/rxptomtom"
         SlashCmdList.RXPTOMTOM = function(msg)
             msg = (msg or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+            if msg == "options" or msg == "opt" then
+                local panel = _G.RXPTOMTOM_OptionsPanel
+                if panel then
+                    if type(Settings) == "table" and type(Settings.OpenToCategory) == "function" then
+                        Settings.OpenToCategory(panel.name)
+                    elseif type(InterfaceOptionsFrame_OpenToCategory) == "function" then
+                        InterfaceOptionsFrame_OpenToCategory(panel)
+                        InterfaceOptionsFrame_OpenToCategory(panel)
+                    end
+                end
+                return
+            end
             if msg == "debug" then
                 debugEnabled = not debugEnabled
                 dbg("Debug %s", debugEnabled and "enabled" or "disabled")
