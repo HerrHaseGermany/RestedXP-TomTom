@@ -10,6 +10,8 @@ local stepWaypointElements = {}
 local debugEnabled = false
 local tick
 local currentOptionsKey
+local rxpHooked = false
+local lastElementSignature
 
 local defaults = {
     showWorldMap = false,
@@ -172,6 +174,28 @@ local function getElementKey(element)
     return table.concat({ inst, zone, x, y, wx, wy }, ":")
 end
 
+local function getElementSignature(element)
+    if not element then
+        return nil
+    end
+
+    local hasZone = (type(element.zone) == "number") and (type(element.x) == "number") and (type(element.y) == "number")
+    local hasWorld = (type(element.wx) == "number") and (type(element.wy) == "number")
+    if not hasZone and not hasWorld then
+        return nil
+    end
+
+    local zone = (type(element.zone) == "number") and element.zone or 0
+    local inst = (type(element.instance) == "number") and element.instance or 0
+
+    local x = hasZone and q(element.x, 10000) or 0
+    local y = hasZone and q(element.y, 10000) or 0
+    local wx = hasWorld and q(element.wx, 10) or 0
+    local wy = hasWorld and q(element.wy, 10) or 0
+
+    return table.concat({ inst, zone, x, y, wx, wy }, ":")
+end
+
 local function clearTomTomWaypoints(tomtom)
     if not tomtom then
         return
@@ -184,6 +208,7 @@ local function clearTomTomWaypoints(tomtom)
     currentWaypointUid = nil
     currentWaypointKey = nil
     currentOptionsKey = nil
+    lastElementSignature = nil
 end
 
 local function isTomTomWaypointValid(tomtom, uid)
@@ -261,6 +286,115 @@ local function addTomTomWaypointFromElement(tomtom, element, opts)
 
     dbg("Add TomTom waypoint: map=%s x=%.4f y=%.4f title=%s", tostring(map), x, y, tostring(title))
     return uid
+end
+
+local function setTomTomFromCurrentArrow()
+    local tomtom = ensureTomTom()
+    local arrowFrame = getRxpArrowFrame()
+    if not (tomtom and arrowFrame and arrowFrame.element) then
+        msg("Unable to set TomTom waypoint (missing arrow element)")
+        return
+    end
+
+    clearTomTomWaypoints(tomtom)
+    local arrivalDist = (tomtom.profile and tomtom.profile.arrow and tomtom.profile.arrow.arrival) or 0
+    local uid = addTomTomWaypointFromElement(tomtom, arrowFrame.element, { crazy = false })
+    if uid and type(tomtom.SetCrazyArrow) == "function" then
+        pcall(tomtom.SetCrazyArrow, tomtom, uid, arrivalDist, uid.title)
+    end
+end
+
+_G.RXPTOMTOM_SetCurrentWaypoint = setTomTomFromCurrentArrow
+
+local function ensureRxpMenuHook()
+    if _G.RXPTOMTOM_MenuHooked then
+        return
+    end
+    _G.RXPTOMTOM_MenuHooked = true
+
+    if type(hooksecurefunc) ~= "function" then
+        return
+    end
+
+    local function injectMenuItem(menu, frame)
+        if type(menu) ~= "table" then
+            return
+        end
+
+        local frameName = frame and frame.GetName and frame:GetName() or nil
+        local isStepMenu = false
+        local isMinimapMenu = false
+
+        if _G.RXPFrame and menu == _G.RXPFrame.menuList then
+            isStepMenu = true
+        elseif frameName == "RXP_MMMenuFrame" then
+            isMinimapMenu = true
+        end
+
+        if debugEnabled then
+            local texts = {}
+            for i = 1, math.min(#menu, 6) do
+                local item = menu[i]
+                if type(item) == "table" then
+                    texts[#texts + 1] = tostring(item.text or "?")
+                end
+            end
+            dbg("Menu hook: frame=%s stepMenu=%s minimapMenu=%s items=%d first=%s",
+                tostring(frameName),
+                isStepMenu and "yes" or "no",
+                isMinimapMenu and "yes" or "no",
+                #menu,
+                table.concat(texts, " | "))
+        end
+
+        if not (isStepMenu or isMinimapMenu) then
+            return
+        end
+
+        local alreadyAdded
+        local insertIndex = #menu + 1
+        for i, item in ipairs(menu) do
+            if type(item) == "table" then
+                if item.text == "Set TomTom waypoint" then
+                    alreadyAdded = true
+                elseif item.text == _G.CLOSE then
+                    insertIndex = i
+                end
+            end
+        end
+
+        if alreadyAdded then
+            return
+        end
+
+        table.insert(menu, insertIndex, {
+            text = "Set TomTom waypoint",
+            notCheckable = 1,
+            func = function()
+                if type(_G.RXPTOMTOM_SetCurrentWaypoint) == "function" then
+                    _G.RXPTOMTOM_SetCurrentWaypoint()
+                end
+            end,
+        })
+    end
+
+    -- Step list menu is a static table; inject immediately so it appears on first open.
+    if _G.RXPFrame and type(_G.RXPFrame.bottomMenu) == "table" then
+        injectMenuItem(_G.RXPFrame.bottomMenu, _G.RXPFrame.MenuFrame)
+    end
+
+    if type(EasyMenu) == "function" then
+        hooksecurefunc("EasyMenu", function(menu, frame, anchor, x, y, displayMode, autoHideDelay)
+            injectMenuItem(menu, frame)
+        end)
+    end
+
+    local libdd = _G.LibStub and LibStub("LibUIDropDownMenu-4.0", true) or nil
+    if libdd and type(libdd.EasyMenu) == "function" then
+        hooksecurefunc(libdd, "EasyMenu", function(_, menu, frame, anchor, x, y, displayMode, autoHideDelay)
+            injectMenuItem(menu, frame)
+        end)
+    end
 end
 
 local function getStepKey(step)
@@ -362,8 +496,9 @@ tick = function()
     local now = GetTime()
 
     local element = arrowFrame.element
-    local key = getElementKey(element)
-    if not key then
+    local db = getConfig()
+    local signature = getElementSignature(element)
+    if not signature then
         if not noTargetSince then
             noTargetSince = now
         end
@@ -381,39 +516,51 @@ tick = function()
 
     noTargetSince = nil
 
-    local db = getConfig()
     local optionsKey = (db.showWorldMap and "1" or "0") .. (db.showMinimap and "1" or "0")
     if currentOptionsKey ~= optionsKey then
         clearTomTomWaypoints(tomtom)
         currentOptionsKey = optionsKey
     end
 
-    local elementKey = element.wpHash or key
+    local elementKey = element.wpHash or signature
+
+    if lastElementSignature and lastElementSignature == signature and currentWaypointUid and currentWaypointKey == elementKey then
+        return
+    end
     local arrivalDist = (tomtom.profile and tomtom.profile.arrow and tomtom.profile.arrow.arrival) or 0
 
     if currentWaypointKey and currentWaypointKey ~= elementKey then
         clearTomTomWaypoints(tomtom)
     end
 
-    if currentWaypointUid and isTomTomWaypointValid(tomtom, currentWaypointUid) and currentWaypointKey == elementKey then
-        if type(tomtom.SetCrazyArrow) == "function" then
-            pcall(tomtom.SetCrazyArrow, tomtom, currentWaypointUid, arrivalDist, currentWaypointUid.title)
-        end
-        return
-    end
-
     local uid = addTomTomWaypointFromElement(tomtom, element, { crazy = false })
     if uid then
         currentWaypointKey = elementKey
         currentWaypointUid = uid
+        lastElementSignature = signature
         if type(tomtom.SetCrazyArrow) == "function" then
             pcall(tomtom.SetCrazyArrow, tomtom, uid, arrivalDist, uid.title)
         end
     end
 end
 
+local function ensureRxpHook()
+    if rxpHooked then
+        return
+    end
+    local rxp = _G.RXPGuides
+    if rxp and type(rxp.DrawArrow) == "function" then
+        hooksecurefunc(rxp, "DrawArrow", function()
+            tick()
+        end)
+        rxpHooked = true
+    end
+end
+
 frame:SetScript("OnEvent", function(_, event, arg1)
     if event == "PLAYER_LOGIN" then
+        ensureRxpMenuHook()
+        ensureRxpHook()
         local function createOptionsPanel()
             local panel = CreateFrame("Frame", "RXPTOMTOM_OptionsPanel", UIParent)
             panel.name = "RestedXP-TomTom"
@@ -537,6 +684,9 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         msg("For the best experience, make sure to keep your RestedXP Guides up to date.")
 
         frame:SetScript("OnUpdate", function(_, elapsed)
+            if rxpHooked then
+                return
+            end
             frame._t = (frame._t or 0) + elapsed
             if frame._t < 0.25 then
                 return
@@ -545,29 +695,37 @@ frame:SetScript("OnEvent", function(_, event, arg1)
             tick()
         end)
 
-        -- RXP can populate the arrow element after login; retry for a bit until it exists.
+        -- RXP can populate the arrow element after login; retry briefly in case hook isn't ready yet.
         if type(C_Timer) == "table" and type(C_Timer.NewTicker) == "function" then
             local attempts = 0
             local ticker
             ticker = C_Timer.NewTicker(0.5, function()
                 attempts = attempts + 1
+                ensureRxpHook()
                 tick()
                 local af = getRxpArrowFrame()
-                if (af and af.element) or attempts >= 20 then
+                if (af and af.element) or attempts >= 10 then
                     if ticker and type(ticker.Cancel) == "function" then
                         ticker:Cancel()
                     end
                 end
             end)
         elseif type(C_Timer) == "table" and type(C_Timer.After) == "function" then
-            C_Timer.After(0.5, tick)
-            C_Timer.After(1.5, tick)
-            C_Timer.After(2.5, tick)
+            C_Timer.After(0.5, function()
+                ensureRxpHook()
+                tick()
+            end)
+            C_Timer.After(1.5, function()
+                ensureRxpHook()
+                tick()
+            end)
         end
         return
     end
 
     if event == "ADDON_LOADED" and (arg1 == "RXPGuides" or arg1 == "TomTom") then
+        ensureRxpMenuHook()
+        ensureRxpHook()
         tick()
         return
     end
