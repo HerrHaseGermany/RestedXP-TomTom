@@ -1,5 +1,8 @@
 ## CHANGELOG
 
+# 1.3.2
+- improved waypoint stability 
+
 # 1.3.1
 - improved waypoint clearing
 

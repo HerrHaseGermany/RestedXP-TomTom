@@ -104,7 +104,9 @@ local function safeDisableRxpArrow()
                 originalShow(self, ...)
             end
             if not isRxpArrowAllowed() then
-                self:Hide()
+                if type(self.SetAlpha) == "function" then
+                    self:SetAlpha(0)
+                end
             end
         end
 
@@ -112,10 +114,16 @@ local function safeDisableRxpArrow()
         arrowFrame.__rxptt_originalSetShown = originalSetShown
         arrowFrame.SetShown = function(self, shown)
             if type(originalSetShown) == "function" then
-                originalSetShown(self, shown)
+                if not isRxpArrowAllowed() then
+                    originalSetShown(self, true)
+                else
+                    originalSetShown(self, shown)
+                end
             end
             if not isRxpArrowAllowed() then
-                self:Hide()
+                if type(self.SetAlpha) == "function" then
+                    self:SetAlpha(0)
+                end
             end
         end
 
