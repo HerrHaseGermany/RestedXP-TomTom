@@ -1,7 +1,11 @@
+-- RestedXP-TomTom: mirror the RestedXP arrow target into a TomTom waypoint.
+-- Keeps TomTom arrow active while hiding the RXP arrow (unless explicitly allowed).
 local addonName = ...
 
+-- Event driver for login/addon lifecycle hooks.
 local frame = CreateFrame("Frame")
 
+-- State for the active TomTom waypoint and per-step cache.
 local currentWaypointUid
 local currentWaypointKey
 local currentStepKey
@@ -13,11 +17,13 @@ local currentOptionsKey
 local rxpHooked = false
 local lastElementSignature
 
+-- Default saved variable settings.
 local defaults = {
     showWorldMap = false,
     showMinimap = false,
 }
 
+-- Ensure and return the saved variables table.
 local function getConfig()
     if type(_G.RXPTT_DB) ~= "table" then
         _G.RXPTT_DB = {}
@@ -32,17 +38,24 @@ local function getConfig()
     return db
 end
 
+-- Legacy/placeholder fields for more complex switching heuristics (currently unused).
 local pendingElementKey
 local pendingElement
 local pendingSince
 local arrivedCooldownUntil
+
+-- Timestamp used to debounce "no target" clears.
 local noTargetSince
 
-local SWITCH_STABLE_SECONDS = 1.0     -- must remain the same target for this long
-local ARRIVE_DISTANCE = 15            -- yards-ish (TomTom distance), switch immediately if closer than this
-local SWITCH_DISTANCE_ADVANTAGE = 10  -- require new waypoint to be this much closer to switch
-local NO_TARGET_CLEAR_SECONDS = 1.0   -- avoid flicker when RXP temporarily has no waypoint
+-- Legacy tuning knobs kept for future waypoint switching logic (unused today).
+local SWITCH_STABLE_SECONDS = 1.0     -- must remain the same target for this long (unused)
+local ARRIVE_DISTANCE = 15            -- yards-ish (TomTom distance), switch immediately if closer than this (unused)
+local SWITCH_DISTANCE_ADVANTAGE = 10  -- require new waypoint to be this much closer to switch (unused)
 
+-- Debounce time to avoid flicker when RXP temporarily has no waypoint.
+local NO_TARGET_CLEAR_SECONDS = 1.0
+
+-- Debug-only chat output.
 local function dbg(fmt, ...)
     if not debugEnabled then
         return
@@ -54,6 +67,7 @@ local function dbg(fmt, ...)
     end
 end
 
+-- User-facing chat output.
 local function msg(fmt, ...)
     if select("#", ...) > 0 then
         DEFAULT_CHAT_FRAME:AddMessage(string.format("|cffffd200%s:|r %s", addonName, string.format(fmt, ...)))
@@ -62,6 +76,7 @@ local function msg(fmt, ...)
     end
 end
 
+-- Safely get the RestedXP arrow frame, if present.
 local function getRxpArrowFrame()
     local af = _G.RXPG_ARROW
     if af and type(af) == "table" and type(af.Hide) == "function" then
@@ -69,6 +84,7 @@ local function getRxpArrowFrame()
     end
 end
 
+-- Read the debug toggle table used to allow the RXP arrow to show.
 local function getRxpDebugState()
     local dbg = _G.RXPTOMTOM_DEBUG
     if type(dbg) == "table" then
@@ -76,11 +92,13 @@ local function getRxpDebugState()
     end
 end
 
+-- Whether the RXP arrow should be visible (debug override).
 local function isRxpArrowAllowed()
     local dbg = getRxpDebugState()
     return dbg and dbg.allowRxpArrow
 end
 
+-- Return the TomTom API table if available.
 local function ensureTomTom()
     local tt = _G.TomTom
     if type(tt) == "table" and type(tt.AddWaypoint) == "function" and type(tt.RemoveWaypoint) == "function" then
@@ -88,6 +106,7 @@ local function ensureTomTom()
     end
 end
 
+-- Hide the RXP arrow while keeping its frame alive so RestedXP continues updating.
 local function safeDisableRxpArrow()
     local arrowFrame = getRxpArrowFrame()
     if not arrowFrame then
@@ -97,6 +116,7 @@ local function safeDisableRxpArrow()
     if not arrowFrame.__rxptt_hooked then
         arrowFrame.__rxptt_hooked = true
 
+        -- Wrap Show/SetShown once so we can zero alpha unless the debug flag allows it.
         local originalShow = arrowFrame.Show
         arrowFrame.__rxptt_originalShow = originalShow
         arrowFrame.Show = function(self, ...)
@@ -130,6 +150,7 @@ local function safeDisableRxpArrow()
         arrowFrame.__rxptt_originalOnUpdate = arrowFrame:GetScript("OnUpdate")
     end
 
+    -- Restore the original OnUpdate to avoid interfering with RXP's own logic.
     local originalOnUpdate = arrowFrame.__rxptt_originalOnUpdate
     if originalOnUpdate then
         arrowFrame:SetScript("OnUpdate", originalOnUpdate)
@@ -150,13 +171,16 @@ local function safeDisableRxpArrow()
     arrowFrame:Show()
 end
 
+-- Expose for external toggles/macros.
 _G.RXPTOMTOM_ApplyRxpArrowState = safeDisableRxpArrow
 
+-- Quantize a number for stable keys.
 local function q(n, scale)
     if type(n) ~= "number" then return 0 end
     return math.floor(n * scale + 0.5)
 end
 
+-- Build a stable key for a step object or index.
 local function getStepKey(step)
     if not step then
         return nil
@@ -167,6 +191,7 @@ local function getStepKey(step)
     return tostring(step)
 end
 
+-- Build a stable key for a waypoint element using quantized coords.
 local function getElementKey(element)
     if not element then
         return nil
@@ -192,6 +217,7 @@ local function getElementKey(element)
     return table.concat({ inst, zone, x, y, wx, wy }, ":")
 end
 
+-- Build a high-resolution signature to detect subtle target changes.
 local function getElementSignature(element)
     if not element then
         return nil
@@ -206,6 +232,7 @@ local function getElementSignature(element)
     local zone = (type(element.zone) == "number") and element.zone or 0
     local inst = (type(element.instance) == "number") and element.instance or 0
 
+    -- Use tighter quantization than getElementKey to reduce missed updates.
     local x = hasZone and q(element.x, 10000) or 0
     local y = hasZone and q(element.y, 10000) or 0
     local wx = hasWorld and q(element.wx, 10) or 0
@@ -214,6 +241,7 @@ local function getElementSignature(element)
     return table.concat({ inst, zone, x, y, wx, wy }, ":")
 end
 
+-- Remove all known waypoints for the current step and reset state.
 local function clearTomTomWaypoints(tomtom)
     if not tomtom then
         return
@@ -229,6 +257,7 @@ local function clearTomTomWaypoints(tomtom)
     lastElementSignature = nil
 end
 
+-- Remove a specific TomTom waypoint by uid.
 local function clearWaypointByUid(tomtom, uid)
     if not (tomtom and uid) then
         return
@@ -236,6 +265,7 @@ local function clearWaypointByUid(tomtom, uid)
     pcall(tomtom.RemoveWaypoint, tomtom, uid)
 end
 
+-- Remove the cached waypoint for a specific step key.
 local function clearStepWaypoint(tomtom, stepKey)
     if not stepKey then
         return
@@ -248,6 +278,7 @@ local function clearStepWaypoint(tomtom, stepKey)
     stepWaypointElements[stepKey] = nil
 end
 
+-- Check whether a waypoint still exists (currently unused).
 local function isTomTomWaypointValid(tomtom, uid)
     if not uid then
         return false
@@ -264,6 +295,7 @@ local function isTomTomWaypointValid(tomtom, uid)
     return ok
 end
 
+-- Add a TomTom waypoint using an RXP element's coordinates.
 local function addTomTomWaypointFromElement(tomtom, element, opts)
     if not (tomtom and element) then
         return
@@ -273,6 +305,7 @@ local function addTomTomWaypointFromElement(tomtom, element, opts)
     local x = element.x and element.x / 100
     local y = element.y and element.y / 100
 
+    -- Prefer zone coordinates; fall back to world coords via HereBeDragons if needed.
     if not (map and x and y) then
         local hbd = _G.LibStub and LibStub("HereBeDragons-2.0", true) or nil
         if hbd and element.wx and element.wy then
@@ -287,10 +320,12 @@ local function addTomTomWaypointFromElement(tomtom, element, opts)
         return
     end
 
+    -- TomTom expects normalized 0..1 coordinates.
     if x < 0 or y < 0 or x > 1 or y > 1 then
         return
     end
 
+    -- Build a human-friendly title with a step index if available.
     local title
     if element.step and element.step.index then
         title = string.format("RXP Step %s", tostring(element.step.index))
@@ -333,6 +368,7 @@ local function addTomTomWaypointFromElement(tomtom, element, opts)
     return uid
 end
 
+-- Create a TomTom waypoint from the current RXP arrow element.
 local function setTomTomFromCurrentArrow()
     local tomtom = ensureTomTom()
     local arrowFrame = getRxpArrowFrame()
@@ -349,8 +385,10 @@ local function setTomTomFromCurrentArrow()
     end
 end
 
+-- Expose a manual command for menu entries or macros.
 _G.RXPTOMTOM_SetCurrentWaypoint = setTomTomFromCurrentArrow
 
+-- Inject "Set TomTom waypoint" into RestedXP menus.
 local function ensureRxpMenuHook()
     if _G.RXPTOMTOM_MenuHooked then
         return
@@ -442,6 +480,7 @@ local function ensureRxpMenuHook()
     end
 end
 
+-- Collect waypoint elements for a step (currently unused).
 local function collectStepWaypoints(arrowElement)
     if not arrowElement or not arrowElement.step then
         return {}
@@ -474,6 +513,7 @@ local function collectStepWaypoints(arrowElement)
     return out
 end
 
+-- Pick the nearest waypoint key by distance (currently unused).
 local function selectBestWaypointKey(tomtom, keys, excludeKey)
     if not keys or not tomtom then
         return nil
@@ -519,6 +559,7 @@ local function selectBestWaypointKey(tomtom, keys, excludeKey)
     return nil
 end
 
+-- Main update loop: sync TomTom waypoint with the current RXP arrow element.
 tick = function()
     local tomtom = ensureTomTom()
     local arrowFrame = getRxpArrowFrame()
@@ -537,6 +578,7 @@ tick = function()
         if not noTargetSince then
             noTargetSince = now
         end
+        -- If the arrow is briefly missing a target, wait a beat before clearing.
         if (now - noTargetSince) >= NO_TARGET_CLEAR_SECONDS then
             clearTomTomWaypoints(tomtom)
             currentStepKey = nil
@@ -551,6 +593,7 @@ tick = function()
 
     noTargetSince = nil
 
+    -- Clear and rebuild if display options changed.
     local optionsKey = (db.showWorldMap and "1" or "0") .. (db.showMinimap and "1" or "0")
     if currentOptionsKey ~= optionsKey then
         clearTomTomWaypoints(tomtom)
@@ -565,11 +608,13 @@ tick = function()
     end
     currentStepKey = stepKey
 
+    -- Avoid churn when the element hasn't materially changed.
     if lastElementSignature and lastElementSignature == signature and currentWaypointUid and currentWaypointKey == elementKey then
         return
     end
     local arrivalDist = (tomtom.profile and tomtom.profile.arrow and tomtom.profile.arrow.arrival) or 0
 
+    -- Replace the old waypoint if the element key changed.
     if currentWaypointKey and currentWaypointKey ~= elementKey then
         clearWaypointByUid(tomtom, currentWaypointUid)
         currentWaypointUid = nil
@@ -577,6 +622,7 @@ tick = function()
         lastElementSignature = nil
     end
 
+    -- Add/update the TomTom waypoint and arrow.
     local uid = addTomTomWaypointFromElement(tomtom, element, { crazy = false })
     if uid then
         currentWaypointKey = elementKey
@@ -588,6 +634,7 @@ tick = function()
     end
 end
 
+-- Hook RestedXP's DrawArrow so we can sync on every arrow update.
 local function ensureRxpHook()
     if rxpHooked then
         return
@@ -601,10 +648,12 @@ local function ensureRxpHook()
     end
 end
 
+-- Event handler for addon lifecycle and player state changes.
 frame:SetScript("OnEvent", function(_, event, arg1)
     if event == "PLAYER_LOGIN" then
         ensureRxpMenuHook()
         ensureRxpHook()
+        -- Build the options panel lazily at login.
         local function createOptionsPanel()
             local panel = CreateFrame("Frame", "RXPTOMTOM_OptionsPanel", UIParent)
             panel.name = "RestedXP-TomTom"
@@ -630,6 +679,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
             reloadBtn:SetPoint("TOPLEFT", minimapCheck, "BOTTOMLEFT", 0, -12)
             reloadBtn:SetText("Reload to apply")
 
+            -- Sync checkboxes from saved variables when opened.
             panel.refresh = function()
                 local db = getConfig()
                 worldCheck:SetChecked(db.showWorldMap)
@@ -637,6 +687,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
             end
             panel:SetScript("OnShow", panel.refresh)
 
+            -- Update saved vars and rebuild TomTom waypoint when toggled.
             worldCheck:SetScript("OnClick", function(self)
                 local db = getConfig()
                 db.showWorldMap = self:GetChecked() and true or false
@@ -659,12 +710,14 @@ frame:SetScript("OnEvent", function(_, event, arg1)
                 tick()
             end)
 
+            -- Some UI changes don't reflect immediately in older clients.
             reloadBtn:SetScript("OnClick", function()
                 if type(ReloadUI) == "function" then
                     ReloadUI()
                 end
             end)
 
+            -- Register panel with the modern Settings UI or legacy interface options.
             if type(Settings) == "table" and type(Settings.RegisterCanvasLayoutCategory) == "function" then
                 local category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
                 Settings.RegisterAddOnCategory(category)
@@ -679,6 +732,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
 
         createOptionsPanel()
 
+        -- Slash command: /rxptomtom [options|debug|clear]
         SLASH_RXPTOMTOM1 = "/rxptomtom"
         SlashCmdList.RXPTOMTOM = function(msg)
             msg = (msg or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
@@ -708,6 +762,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
                 return
             end
 
+            -- Default output: quick status dump for diagnostics.
             local tt = ensureTomTom()
             local af = getRxpArrowFrame()
             local el = af and af.element
@@ -727,6 +782,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         end
         msg("For the best experience, make sure to keep your RestedXP Guides up to date.")
 
+        -- Fallback polling until we successfully hook DrawArrow.
         frame:SetScript("OnUpdate", function(_, elapsed)
             if rxpHooked then
                 return
@@ -779,6 +835,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
     end
 end)
 
+-- Event subscriptions.
 frame:RegisterEvent("PLAYER_LOGIN")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_CONTROL_GAINED")

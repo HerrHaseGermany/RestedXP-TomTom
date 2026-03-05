@@ -1,5 +1,8 @@
 ## CHANGELOG
 
+# 1.3.3
+- minor edit
+
 # 1.3.2
 - improved waypoint stability 
 
