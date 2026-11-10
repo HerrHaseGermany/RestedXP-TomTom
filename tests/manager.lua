@@ -47,6 +47,9 @@ function methods:StartMoving() self.moving = true end
 function methods:StopMovingOrSizing() self.moving = false end
 function methods:SetBackdropColor(_, _, _, alpha) self.backgroundAlpha = alpha end
 function methods:SetAlpha(alpha) self.alpha = alpha end
+function methods:GetFrameLevel() return self.frameLevel or 1 end
+function methods:SetFrameLevel(value) self.frameLevel = value end
+function methods:HighlightText() self.highlighted = true end
 function methods:SetOrientation(value) self.orientation = value end
 function methods:SetThumbTexture(value)
     self.thumbPath = value
@@ -68,7 +71,7 @@ end
 UIParent = CreateFrame("Frame", "UIParent")
 UISpecialFrames = {}
 C_Map = {
-    GetMapInfo = function(id) if id == 1 or id == 2 then return { name = "Zone " .. id } end end,
+    GetMapInfo = function(id) if id == 1 or id == 2 or id == 1213 then return { name = "Zone " .. id } end end,
     GetBestMapForUnit = function() return 1 end,
 }
 function TomTom:GetCurrentPlayerPosition() return 1, 0.2, 0.3 end
@@ -169,7 +172,7 @@ manager:Sync()
 assert(manager.order[1] == b and manager.order[2] == a, "saved order restored when rebuilding the list")
 local rxpRow
 for _, row in ipairs(manager.rows) do if row.uid == rxpTarget then rxpRow = row end end
-assert(rxpRow and not rxpRow.delete.enabled and not rxpRow.mouseEnabled, "RXP targets protected from delete/reorder")
+assert(rxpRow and not rxpRow.delete.enabled and not rxpRow.grip:IsShown(), "RXP targets protected from delete/reorder")
 rxpRow.scripts.OnDragStart()
 assert(not manager.dragUid, "protected rows cannot start dragging")
 assert(not rxpRow.up and not rxpRow.down and rxpRow.delete.text == "", "up/down and remove text replaced")
@@ -353,6 +356,133 @@ RXPGuides.currentGuide = {}
 manager:Update()
 assert(not manager.running and TomTom:IsValidWaypoint(switched), "unrelated guide switch cancels waiting and preserves queued targets")
 manager:ClearAndResume()
+
+local pasteCases = {
+    { "/way #1213 35.2 57.2 Target 7", { map = 1213, x = 35.2, y = 57.2, title = "Target 7" } },
+    { "#1213 35.2 57.2", { map = 1213, x = 35.2, y = 57.2 } },
+    { "1213 35.2 57.2", { map = 1213, x = 35.2, y = 57.2 } },
+    { "35.2 57.2", { x = 35.2, y = 57.2 } },
+    { "/WAY 35.2 57.2 Bare coordinates", { x = 35.2, y = 57.2, title = "Bare coordinates" } },
+    { "35,2 57,2", { x = 35.2, y = 57.2 } },
+    { "35.2,57.2 Compact pair", { x = 35.2, y = 57.2, title = "Compact pair" } },
+    { "(35.2, 57.2)", { x = 35.2, y = 57.2 } },
+    { "35,57", { x = 35, y = 57 } },
+    { "# 1213", { map = 1213 } },
+    { "/tway #1213 35,2 57,2 Target", { map = 1213, x = 35.2, y = 57.2, title = "Target" } },
+    { "57.2", { y = 57.2 }, "y" },
+    { "2", { map = 2 }, "map" },
+    { "#1213 35.2", { map = 1213, x = 35.2 } },
+}
+for _, case in ipairs(pasteCases) do
+    local fields, err = manager:ParseWaypointText(case[1], case[3])
+    assert(fields, case[1] .. ": " .. tostring(err))
+    for key, value in pairs(case[2]) do assert(fields[key] == value, case[1] .. " / " .. key) end
+    for key in pairs(fields) do assert(case[2][key] ~= nil, "unexpected parsed field: " .. case[1]) end
+end
+for _, bad in ipairs({ "", "/run print('bad')", "/way reset all", "#invalid 10 20", "#999 10 20",
+    "10 101", "#1.5 10 20", "10 20\n30 40", "#1 10 invalid" }) do
+    assert(not manager:ParseWaypointText(bad), "invalid or ambiguous paste must not change the form: " .. bad)
+end
+manager.inputs.map:SetText("2")
+manager.inputs.title:SetText("Keep title")
+local previousAdds = TomTom.adds
+assert(manager:ApplyPastedText("35.2 57.2"))
+assert(manager.inputs.map:GetText() == "2" and manager.inputs.title:GetText() == "Keep title",
+    "coordinate-only pastes preserve the existing map and title")
+assert(TomTom.adds == previousAdds, "paste fills the form without creating a waypoint")
+local oldX = manager.inputs.x:GetText()
+assert(not manager:ApplyPastedText("#1213 bad coordinates") and manager.inputs.x:GetText() == oldX,
+    "failed paste leaves existing values untouched")
+local originalGetTime = GetTime
+local now = GetTime()
+GetTime = function() return now end
+IsControlKeyDown = function() return true end
+local function nativePaste(key, value)
+    local field = manager.inputs[key]
+    field.scripts.OnKeyDown(field, "V")
+    assert(field.highlighted, "native paste replaces the existing field rather than appending")
+    field:SetText(value)
+    field.scripts.OnTextChanged(field, true)
+    now = now + 0.2
+    manager:Update()
+end
+for _, key in ipairs({ "map", "x", "y", "title" }) do
+    manager.inputs.map:SetText("2")
+    manager.inputs.title:SetText("Previous title")
+    nativePaste(key, "/way #1213 35.2 57.2 Imported target")
+    assert(manager.inputs.map:GetText() == "1213" and manager.inputs.x:GetText() == "35.2"
+        and manager.inputs.y:GetText() == "57.2" and manager.inputs.title:GetText() == "Imported target",
+        "full waypoint paste distributed correctly from " .. key)
+    manager.inputs.map:SetText("2")
+    manager.inputs.title:SetText("Keep title")
+    nativePaste(key, "35.2 57.2")
+    assert(manager.inputs.map:GetText() == "2" and manager.inputs.title:GetText() == "Keep title",
+        "coordinate-only paste preserves map and title when pasted into " .. key)
+end
+nativePaste("y", "64.5")
+assert(manager.inputs.y:GetText() == "64.5", "single pasted coordinate respects the Y field")
+nativePaste("title", "Meeting point 42")
+assert(manager.inputs.title:GetText() == "Meeting point 42", "plain title paste remains a title")
+local oldMap = manager.inputs.map:GetText()
+nativePaste("map", "#999 10 20")
+assert(manager.inputs.map:GetText() == oldMap, "invalid paste restores the source field")
+-- Mac's modifier follows the same native paste handling.
+IsControlKeyDown = function() return false end
+IsMetaKeyDown = function() return true end
+nativePaste("title", "/way #1213 35.2 57.2 Imported target")
+IsMetaKeyDown = function() return false end
+assert(not manager.pasteButton and not manager.pasteCapture and not manager.fieldPaste,
+    "direct field paste requires no button or hidden activation input")
+local titleField = manager.inputs.title
+titleField:SetText("")
+titleField.scripts.OnTextChanged(titleField, false)
+local typed = "42 53 meeting point"
+for index = 1, #typed do
+    titleField:SetText(typed:sub(1, index))
+    titleField.scripts.OnTextChanged(titleField, true)
+end
+assert(not manager.fieldPaste and titleField:GetText() == typed, "ordinary typing of numeric-looking titles does not trigger import")
+manager.inputs.map:SetText("2")
+manager.inputs.x:SetText("10")
+manager.inputs.x.scripts.OnTextChanged(manager.inputs.x, false)
+manager.inputs.x:SetText("35.2 57.2")
+manager.inputs.x.scripts.OnTextChanged(manager.inputs.x, true)
+now = now + 0.2
+manager:Update()
+assert(manager.inputs.map:GetText() == "2" and manager.inputs.y:GetText() == "57.2",
+    "compound paste fallback works when a client omits the key callback")
+local previousX = manager.inputs.x:GetText()
+manager:PrepareFieldPaste("x")
+manager.inputs.x:SetText("/way #1213 1 2")
+manager.inputs.x.scripts.OnTextChanged(manager.inputs.x, true)
+manager.inputs.x.scripts.OnEscapePressed()
+assert(not manager.fieldPaste and manager.inputs.x:GetText() == previousX, "Escape cancels a pending import and restores its source")
+IsControlKeyDown = function() return true end
+nativePaste("title", "/way #1213 35.2 57.2 Imported target")
+assert(manager.mapNotice:IsShown() and manager.mapNotice.text:find("Zone 1213", 1, true),
+    "pasting a map ID briefly identifies its zone")
+now = now + 4
+manager:Update()
+assert(not manager.mapNotice:IsShown() and manager.addLabel:IsShown(), "zone notice expires")
+GetTime = originalGetTime
+manager.inputs.map:SetText("#1213")
+manager.inputs.map.scripts.OnEditFocusLost(manager.inputs.map)
+assert(manager.inputs.map:GetText() == "1213", "manually entered # map IDs are normalized")
+local imported = assert(manager:Add("#1213", "35,2", "57,2", "Imported target"))
+assert(imported[1] == 1213 and math.abs(imported[2] - 0.352) < 1e-10 and math.abs(imported[3] - 0.572) < 1e-10,
+    "TomTom receives numeric map IDs and normalized decimal coordinates")
+local copyRow
+for _, item in ipairs(manager.rows) do if item.uid == imported then copyRow = item end end
+copyRow.scripts.OnMouseUp(copyRow, "RightButton")
+assert(manager.clipboardMode == "copy" and manager.clipboardEdit.highlighted, "right-click selects the exported waypoint for copying")
+local exported = manager.clipboardEdit:GetText()
+assert(exported:find("/way #1213 35.2000 57.2000 Imported target", 1, true), "copy export uses explicit map ID and title")
+local roundTrip = assert(manager:ParseWaypointText(exported))
+assert(roundTrip.map == 1213 and roundTrip.x == 35.2 and roundTrip.y == 57.2 and roundTrip.title == "Imported target",
+    "copy output round-trips through the paste parser")
+manager.clipboardEdit.scripts.OnEnterPressed()
+assert(not manager.clipboardPanel:IsShown(), "Enter closes copy view without importing or adding anything")
+manager:Remove(imported)
 
 assert(RXPTOMTOM.GetConfig().managerOpen, "desired window visibility saved by explicit toggle")
 manager.window:Hide()

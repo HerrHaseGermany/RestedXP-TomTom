@@ -1,5 +1,10 @@
 ## CHANGELOG
 
+# 1.5.1
+- Support Ctrl/Cmd+V directly in any waypoint field, automatically distributing full /way commands, explicit map IDs, coordinates alone and decimal commas. No activation button is needed. Rename My zone to My position.
+- Add right-click waypoint export with preselected text for Ctrl/Cmd+C, and brief zone-name feedback for map IDs.
+- Normalize # prefixes in map IDs before passing numeric values to TomTom.
+
 # 1.5
 - Add a compact 300 × 350 Waypoint Manager with three visible rows, add/go/trash controls, saved drag-and-drop ordering, and route start/stop controls.
 - Allow targets below the RXP entry so routes can wait for the guide step to complete before continuing.

@@ -255,8 +255,160 @@ function manager:ClearAndResume()
     self:Refresh()
 end
 
+local function parseNumber(value)
+    return tonumber((tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", ""):gsub(",", ".")))
+end
+
+local function parseMap(value)
+    return parseNumber((tostring(value or ""):gsub("^%s*#%s*", "")))
+end
+
+-- Parse data only: pasted slash commands are never executed.
+function manager:ParseWaypointText(raw, context)
+    raw = (raw or ""):gsub("\194\160", " "):gsub("^%s+", ""):gsub("%s+$", "")
+    if raw == "" then return nil, "Paste a waypoint or coordinates first." end
+    if raw:find("[\r\n]%s*%S") then return nil, "Paste one waypoint at a time." end
+    raw = raw:gsub("[\r\n]", " ")
+    if raw:sub(1, 1) == "/" then
+        local command, rest = raw:match("^(%S+)%s*(.*)$")
+        command = command:lower()
+        if command ~= "/way" and command ~= "/tway" and command ~= "/tomtomway" then
+            return nil, "Use /way, a map ID, or plain coordinates."
+        end
+        raw = rest
+    end
+    raw = raw:gsub("^%(", ""):gsub("%)$", ""):gsub("#%s+(%d+)", "#%1")
+    -- Also accept compact X,Y pairs and whitespace-separated decimal commas.
+    local first, tail = raw:match("^(%S+)(.*)$")
+    local compactX, compactY
+    if first then compactX, compactY = first:match("^(%d+%.?%d*),(%d+%.?%d*)$") end
+    if compactX and (tail == "" or not parseNumber(tail:match("^%s*(%S+)"))) then
+        raw = compactX .. " " .. compactY .. tail
+    end
+    local tokens = {}
+    for token in raw:gmatch("%S+") do tokens[#tokens + 1] = token end
+    if #tokens == 0 then return nil, "Paste a waypoint or coordinates first." end
+    local function number(index)
+        local token = tokens[index]
+        if not token then return nil end
+        return parseNumber((token:gsub("[,;]$", ""):gsub("%%$", "")))
+    end
+    local result, offset = {}, 1
+    if tokens[1]:sub(1, 1) == "#" then
+        result.map = parseMap(tokens[1])
+        if not result.map then return nil, "Invalid map ID after #." end
+        offset = 2
+    elseif #tokens >= 3 and number(1) and number(2) and number(3) then
+        -- Three leading numbers mean map ID, X, Y; two mean X, Y.
+        result.map, offset = number(1), 2
+    elseif #tokens == 1 and number(1) then
+        local value = number(1)
+        if context == "map" or value > 100 then result.map, offset = value, 2 end
+    end
+    local remaining = #tokens - offset + 1
+    if remaining > 0 then
+        local x, y = number(offset), number(offset + 1)
+        if not x or (remaining >= 2 and not y) then return nil, "Expected X and Y coordinates." end
+        if x < 0 or x > 100 or (y and (y < 0 or y > 100)) then
+            return nil, "Coordinates must be between 0 and 100."
+        end
+        if remaining == 1 and context == "y" then result.y = x
+        else result.x, result.y = x, y end
+        if remaining > 2 then result.title = table.concat(tokens, " ", offset + 2) end
+    end
+    if result.map then
+        if result.map <= 0 or result.map == math.huge or result.map ~= math.floor(result.map)
+            or (C_Map and C_Map.GetMapInfo and not C_Map.GetMapInfo(result.map)) then
+            return nil, "Unknown or invalid map ID."
+        end
+    end
+    return result
+end
+
+function manager:ApplyPastedText(raw)
+    local values, err = self:ParseWaypointText(raw, self.pasteContext)
+    if not values then return nil, err end
+    for key, value in pairs(values) do self.inputs[key]:SetText(tostring(value)) end
+    self:ShowMapNotice(values.map or parseMap(self.inputs.map:GetText()))
+    return true
+end
+
+function manager:ShowMapNotice(map)
+    if not map or map ~= map or map == math.huge or map <= 0 or map ~= math.floor(map) then return end
+    local info = map and C_Map and C_Map.GetMapInfo and C_Map.GetMapInfo(map)
+    if not info or not self.mapNotice then return end
+    self.mapNotice:SetText(string.format("#%d: %s", map, info.name))
+    self.mapNotice:Show()
+    self.addLabel:Hide()
+    self.mapNoticeUntil = GetTime() + 3
+end
+
+function manager:ExportWaypoint(uid)
+    if type(uid) ~= "table" or not valid(uid) then return nil end
+    local title = (uid.title or ""):gsub("[\r\n]", " ")
+    return string.format("/way #%d %.4f %.4f%s", uid[1], uid[2] * 100, uid[3] * 100,
+        title ~= "" and (" " .. title) or "")
+end
+
+function manager:CopyWaypoint(uid)
+    local value = self:ExportWaypoint(uid)
+    if not value then return end
+    if self.pendingPaste then self:FinishPaste() else self:CancelPaste() end
+    self:OpenCopy(value)
+end
+
+function manager:CancelPaste(restore)
+    local pending = self.fieldPaste
+    self.fieldPaste, self.pendingPaste = nil, nil
+    if restore and pending then pending.field:SetText(pending.previous) end
+end
+
+function manager:PrepareFieldPaste(key)
+    if self.pendingPaste then self:FinishPaste() else self:CancelPaste() end
+    local field = self.inputs[key]
+    self.fieldPaste = { field = field, key = key, previous = field:GetText() }
+    -- Let the client's native paste replace the field, including long commands.
+    field:HighlightText()
+end
+
+function manager:FieldTextChanged(key, field, userInput)
+    local value, previous = field:GetText(), field.previousText or ""
+    field.previousText = value
+    if not userInput then return end
+    if self.fieldPaste and self.fieldPaste.field == field then
+        self.pendingPaste = GetTime() + 0.15
+    elseif not self.fieldPaste then
+        -- Fallback for clients that deliver native paste without an OnKeyDown.
+        local parsed = self:ParseWaypointText(value, key)
+        if parsed and parsed.x and parsed.y and math.abs(#value - #previous) > 1 then
+            self.fieldPaste = { field = field, key = key, previous = previous }
+            self.pendingPaste = GetTime() + 0.15
+        end
+    end
+    if key == "map" then self.pendingMapNotice = GetTime() + 0.35 end
+end
+
+function manager:FinishPaste()
+    local pending = self.fieldPaste
+    if not pending then return end
+    local raw = pending.field:GetText()
+    self:CancelPaste(true)
+    self.pasteContext = pending.key
+    local ok, err
+    if pending.key == "title" and not raw:match("^%s*[/#]") then
+        local parsed = self:ParseWaypointText(raw, pending.key)
+        if not parsed or (not parsed.map and not parsed.y) then
+            self.inputs.title:SetText(raw)
+            return true
+        end
+    end
+    ok, err = self:ApplyPastedText(raw)
+    self.error:SetText(ok and "Values imported. Check and Add." or err)
+    return ok
+end
+
 function manager:Add(mapText, xText, yText, title)
-    local map, x, y = tonumber(mapText), tonumber(xText), tonumber(yText)
+    local map, x, y = parseMap(mapText), parseNumber(xText), parseNumber(yText)
     if not map or map ~= math.floor(map) or map <= 0 or map == math.huge or not x or not y
         or x ~= x or y ~= y or x < 0 or x > 100 or y < 0 or y > 100 then
         return nil, "Enter a valid map ID and X/Y coordinates from 0 to 100."
@@ -282,6 +434,16 @@ end
 function manager:Update()
     local tt = api.GetTomTom()
     if not tt then return end
+    if self.pendingPaste and GetTime() >= self.pendingPaste then self:FinishPaste() end
+    if self.pendingMapNotice and GetTime() >= self.pendingMapNotice then
+        self.pendingMapNotice = nil
+        self:ShowMapNotice(parseMap(self.inputs.map:GetText()))
+    end
+    if self.mapNoticeUntil and GetTime() >= self.mapNoticeUntil then
+        self.mapNoticeUntil = nil
+        self.mapNotice:Hide()
+        self.addLabel:Show()
+    end
     if tt.IsCrazyArrowEmpty and tt:IsCrazyArrowEmpty() and valid(self.active) then self.active = nil end
     if self.running then
         if not self:Sync() then self:Stop(); return end
@@ -345,6 +507,44 @@ local function enabled(control, value)
     if value then control:Enable() else control:Disable() end
 end
 
+-- Addons use the client's normal copy/paste keyboard shortcuts in an EditBox.
+function manager:OpenCopy(value)
+    if not self.clipboardPanel then
+        local panel = CreateFrame("Frame", nil, self.controls, "BackdropTemplate")
+        panel:SetSize(284, 126)
+        panel:SetPoint("TOPLEFT", 8, -208)
+        panel:SetFrameLevel(self.controls:GetFrameLevel() + 20)
+        panel:EnableMouse(true)
+        panel:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            edgeSize = 12, insets = { left = 3, right = 3, top = 3, bottom = 3 } })
+        panel:SetBackdropColor(0.04, 0.05, 0.07, 1)
+        local label = text(panel, "", 12, -12)
+        label:SetWidth(260)
+        label:SetJustifyH("LEFT")
+        local edit = CreateFrame("EditBox", nil, panel, "InputBoxTemplate")
+        edit:SetPoint("TOPLEFT", 16, -44)
+        edit:SetSize(250, 24)
+        edit:SetAutoFocus(false)
+        edit:SetMaxLetters(2048)
+        local function apply()
+            edit:ClearFocus()
+            panel:Hide()
+        end
+        self.clipboardApply = button(panel, "Apply", 116, 12, -86, apply)
+        button(panel, "Cancel", 116, 144, -86, function() edit:ClearFocus(); panel:Hide() end)
+        edit:SetScript("OnEnterPressed", apply)
+        edit:SetScript("OnEscapePressed", function() edit:ClearFocus(); panel:Hide() end)
+        self.clipboardPanel, self.clipboardEdit, self.clipboardLabel = panel, edit, label
+    end
+    self.clipboardMode = "copy"
+    self.clipboardLabel:SetText("Ctrl+C / Cmd+C to copy, Enter to close.")
+    self.clipboardApply:SetText("Done")
+    self.clipboardPanel:Show()
+    self.clipboardEdit:SetText(value or "")
+    self.clipboardEdit:SetFocus()
+    self.clipboardEdit:HighlightText()
+end
+
 local function trashButton(parent, action)
     local control = button(parent, "", 24, 220, -7, action)
     local icon = CreateFrame("Frame", nil, control)
@@ -387,6 +587,9 @@ function manager:Refresh()
             row:RegisterForDrag("LeftButton")
             row:SetScript("OnDragStart", function() self:BeginDrag(row) end)
             row:SetScript("OnDragStop", function() self:FinishDrag() end)
+            row:SetScript("OnMouseUp", function(_, mouseButton)
+                if mouseButton == "RightButton" then self:CopyWaypoint(row.uid) end
+            end)
             local bg = row:CreateTexture(nil, "BACKGROUND")
             bg:SetAllPoints()
             bg:SetColorTexture(1, 1, 1, index % 2 == 0 and 0.025 or 0.06)
@@ -417,7 +620,7 @@ function manager:Refresh()
         enabled(row.go, not active)
         row.label:SetText(string.format("%s  %s%s", prefix, uid.title or "Waypoint", active and "  |cffffd200<|r" or ""))
         row.detail:SetText(string.format("%s  |  %.2f, %.2f", mapName(uid[1]), uid[2] * 100, uid[3] * 100))
-        row:EnableMouse(managed(uid))
+        row:EnableMouse(true)
         row.grip:SetShown(managed(uid))
         enabled(row.delete, managed(uid))
         row.delete.icon:SetAlpha(managed(uid) and 1 or 0.25)
@@ -582,7 +785,12 @@ function manager:CreateWindow()
     self.empty = text(contents, "No waypoints. Add a target below or load an RXP guide.", 20, -96)
     self.empty:SetWidth(230)
     self.empty:SetJustifyH("LEFT")
-    text(contents, "Add waypoint", 12, -216, "GameFontNormal")
+    self.addLabel = text(contents, "Add waypoint", 12, -216, "GameFontNormal")
+    self.mapNotice = text(contents, "", 12, -216, "GameFontNormal")
+    self.mapNotice:SetWidth(244)
+    self.mapNotice:SetWordWrap(false)
+    self.mapNotice:SetJustifyH("LEFT")
+    self.mapNotice:Hide()
     self.inputs = {}
     local function input(key, label, width, x, y)
         text(contents, label, x, y + 18)
@@ -590,8 +798,28 @@ function manager:CreateWindow()
         field:SetAutoFocus(false)
         field:SetSize(width, 24)
         field:SetPoint("TOPLEFT", x + 4, y)
-        field:SetMaxLetters(key == "title" and 100 or 12)
-        field:SetScript("OnEscapePressed", function() field:ClearFocus() end)
+        field:SetMaxLetters(2048)
+        field:SetScript("OnEscapePressed", function() self:CancelPaste(true); field:ClearFocus() end)
+        field:SetScript("OnKeyDown", function(_, pressed)
+            local modifier = (IsControlKeyDown and IsControlKeyDown()) or (IsMetaKeyDown and IsMetaKeyDown())
+            if (pressed == "V" and modifier) or (pressed == "INSERT" and IsShiftKeyDown and IsShiftKeyDown()) then
+                self:PrepareFieldPaste(key)
+            end
+        end)
+        field:SetScript("OnTextChanged", function(control, userInput) self:FieldTextChanged(key, control, userInput) end)
+        field:SetScript("OnEditFocusLost", function()
+            if self.fieldPaste and self.fieldPaste.field == field then
+                if self.pendingPaste then self:FinishPaste() else self:CancelPaste() end
+            end
+            if key == "map" then
+                local map = parseMap(field:GetText())
+                if map and map > 0 and map < math.huge and map == math.floor(map) then
+                    field:SetText(tostring(map))
+                    self:ShowMapNotice(map)
+                end
+            end
+        end)
+        field:SetScript("OnEditFocusGained", function() self.lastInput = key end)
         self.inputs[key] = field
         return field
     end
@@ -608,6 +836,7 @@ function manager:CreateWindow()
     self.error:SetWidth(276)
     self.error:SetJustifyH("LEFT")
     local function add()
+        if self.pendingPaste and not self:FinishPaste() then return end
         local fields = self.inputs
         local uid, err = self:Add(fields.map:GetText(), fields.x:GetText(), fields.y:GetText(), fields.title:GetText())
         self.error:SetText(err or "Waypoint added.")
@@ -617,12 +846,16 @@ function manager:CreateWindow()
     end
     button(contents, "Add", 78, 210, -299, add)
     self.inputs.title:SetScript("OnEnterPressed", add)
-    button(contents, "My zone", 78, 210, -252, function() self:FillCurrentZone() end)
+    button(contents, "My position", 78, 210, -252, function() self:FillCurrentZone() end)
     window:SetScript("OnShow", function()
         if self.inputs.map:GetText() == "" then self:FillCurrentZone() end
         self:Refresh()
     end)
-    window:SetScript("OnHide", function() self:CancelDrag() end)
+    window:SetScript("OnHide", function()
+        self:CancelDrag()
+        self:CancelPaste(true)
+        if self.clipboardPanel then self.clipboardEdit:ClearFocus(); self.clipboardPanel:Hide() end
+    end)
     self:ApplyDisplaySettings()
     window:Hide()
 end
