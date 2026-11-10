@@ -1,5 +1,15 @@
 ## CHANGELOG
 
+# 1.4
+- Add a compact 300 × 350 Waypoint Manager with three visible rows, add/go/trash controls, saved drag-and-drop ordering, and route start/stop controls.
+- Allow targets below the RXP entry so routes can wait for the guide step to complete before continuing.
+- Automatically advance after removing the active target; add "Clear & RXP" to remove all targets and resume the current guide target.
+- Add an optional draggable minimap launcher and manager settings for position locking and independent background/controls transparency.
+- Initialize checkbox and slider values immediately and restore manager visibility across sessions. Toggle visibility through menus or the minimap button, without a close X or Escape closing.
+- Keep the manager below normal interface windows and dialogs.
+- Pause RXP arrow control while navigating to other TomTom waypoints and resume after all foreign targets are removed. Manual RXP resume actions preserve other targets.
+- Detect deleted RXP waypoints even when the guide target has not changed.
+
 # 1.3.3
 - minor edit
 

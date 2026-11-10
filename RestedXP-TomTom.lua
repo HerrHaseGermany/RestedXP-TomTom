@@ -16,6 +16,14 @@ local tick
 local currentOptionsKey
 local rxpHooked = false
 local lastElementSignature
+local tomtomHooked
+local navigationPaused = false
+local noForeignWaypointsSince
+local lastNavigationCheck = -math.huge
+local restoreArrow = false
+local ownedWaypointUids = setmetatable({}, { __mode = "k" })
+
+local RESUME_DELAY = 0.5
 
 -- Default saved variable settings.
 local defaults = {
@@ -35,6 +43,17 @@ local function getConfig()
     if db.showMinimap == nil then
         db.showMinimap = defaults.showMinimap
     end
+    if type(db.managerMinimap) ~= "table" then
+        db.managerMinimap = { hide = false }
+    end
+    if db.managerLocked == nil then db.managerLocked = false end
+    local transparency = tonumber(db.managerTransparency) or 2
+    if transparency ~= transparency then transparency = 2 end
+    db.managerTransparency = math.max(0, math.min(100, transparency))
+    local controls = tonumber(db.managerControlsTransparency) or 0
+    if controls ~= controls then controls = 0 end
+    db.managerControlsTransparency = math.max(0, math.min(100, controls))
+    if db.managerOpen == nil then db.managerOpen = false end
     return db
 end
 
@@ -104,6 +123,44 @@ local function ensureTomTom()
     if type(tt) == "table" and type(tt.AddWaypoint) == "function" and type(tt.RemoveWaypoint) == "function" then
         return tt
     end
+end
+
+local function isOwnedWaypoint(uid)
+    return uid and ownedWaypointUids[uid] == true
+end
+
+-- Unknown waypoint storage must not be treated as an empty manager route.
+local function hasForeignWaypoints(tomtom)
+    if type(tomtom.waypoints) ~= "table" then
+        return nil
+    end
+    for _, waypoints in pairs(tomtom.waypoints) do
+        for _, uid in pairs(waypoints) do
+            if not isOwnedWaypoint(uid) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function ensureTomTomHook(tomtom)
+    if tomtomHooked == tomtom or type(hooksecurefunc) ~= "function"
+        or type(tomtom.SetCrazyArrow) ~= "function" then
+        return
+    end
+    tomtomHooked = tomtom
+    -- A manager may already have selected its target before our login handler.
+    if hasForeignWaypoints(tomtom) ~= false then
+        navigationPaused = true
+    end
+    hooksecurefunc(tomtom, "SetCrazyArrow", function(_, uid)
+        if uid and not isOwnedWaypoint(uid) then
+            navigationPaused = true
+            noForeignWaypointsSince = nil
+            lastNavigationCheck = -math.huge
+        end
+    end)
 end
 
 -- Hide the RXP arrow while keeping its frame alive so RestedXP continues updating.
@@ -278,7 +335,7 @@ local function clearStepWaypoint(tomtom, stepKey)
     stepWaypointElements[stepKey] = nil
 end
 
--- Check whether a waypoint still exists (currently unused).
+-- Check whether a waypoint still exists.
 local function isTomTomWaypointValid(tomtom, uid)
     if not uid then
         return false
@@ -355,6 +412,9 @@ local function addTomTomWaypointFromElement(tomtom, element, opts)
     end
 
     local uid = tomtom:AddWaypoint(map, x, y, waypointOpts)
+    if uid then
+        ownedWaypointUids[uid] = true
+    end
 
     dbg("Add TomTom waypoint: map=%s x=%.4f y=%.4f title=%s", tostring(map), x, y, tostring(title))
 
@@ -370,6 +430,9 @@ end
 
 -- Create a TomTom waypoint from the current RXP arrow element.
 local function setTomTomFromCurrentArrow()
+    if _G.RXPTOMTOM_Manager and not _G.RXPTOMTOM_Manager.resumingRxp then
+        _G.RXPTOMTOM_Manager:Stop()
+    end
     local tomtom = ensureTomTom()
     local arrowFrame = getRxpArrowFrame()
     if not (tomtom and arrowFrame and arrowFrame.element) then
@@ -377,18 +440,34 @@ local function setTomTomFromCurrentArrow()
         return
     end
 
-    clearTomTomWaypoints(tomtom)
-    local arrivalDist = (tomtom.profile and tomtom.profile.arrow and tomtom.profile.arrow.arrival) or 0
-    local uid = addTomTomWaypointFromElement(tomtom, arrowFrame.element, { crazy = false })
-    if uid and type(tomtom.SetCrazyArrow) == "function" then
-        pcall(tomtom.SetCrazyArrow, tomtom, uid, arrivalDist, uid.title)
-    end
+    -- Explicit user action may resume even with a manager route still present.
+    ensureTomTomHook(tomtom)
+    navigationPaused = false
+    noForeignWaypointsSince = nil
+    restoreArrow = true
+    tick()
 end
 
 -- Expose a manual command for menu entries or macros.
 _G.RXPTOMTOM_SetCurrentWaypoint = setTomTomFromCurrentArrow
 
--- Inject "Set TomTom waypoint" into RestedXP menus.
+-- Shared bridge for the manager UI; RXP remains the owner of its targets.
+_G.RXPTOMTOM = {
+    GetConfig = getConfig,
+    GetTomTom = ensureTomTom,
+    IsRxpWaypoint = isOwnedWaypoint,
+    IsPaused = function() return navigationPaused end,
+    ResumeRxp = setTomTomFromCurrentArrow,
+    GetRxpState = function()
+        local rxp, arrow = _G.RXPGuides, getRxpArrowFrame()
+        local step = arrow and arrow.element and arrow.element.step
+        local guide = rxp and rxp.currentGuide
+        local progress = rxp and type(rxp.GetGuideProgress) == "function" and rxp.GetGuideProgress() or nil
+        return step, guide, progress
+    end,
+}
+
+-- Inject the explicit resume action into RestedXP menus.
 local function ensureRxpMenuHook()
     if _G.RXPTOMTOM_MenuHooked then
         return
@@ -408,7 +487,7 @@ local function ensureRxpMenuHook()
         local isStepMenu = false
         local isMinimapMenu = false
 
-        if _G.RXPFrame and menu == _G.RXPFrame.menuList then
+        if _G.RXPFrame and (menu == _G.RXPFrame.menuList or menu == _G.RXPFrame.bottomMenu) then
             isStepMenu = true
         elseif frameName == "RXP_MMMenuFrame" then
             isMinimapMenu = true
@@ -438,7 +517,7 @@ local function ensureRxpMenuHook()
         local insertIndex = #menu + 1
         for i, item in ipairs(menu) do
             if type(item) == "table" then
-                if item.text == "Set TomTom waypoint" then
+                if item.text == "Resume RXP navigation" then
                     alreadyAdded = true
                 elseif item.text == _G.CLOSE then
                     insertIndex = i
@@ -451,12 +530,19 @@ local function ensureRxpMenuHook()
         end
 
         table.insert(menu, insertIndex, {
-            text = "Set TomTom waypoint",
+            text = "Resume RXP navigation",
             notCheckable = 1,
             func = function()
                 if type(_G.RXPTOMTOM_SetCurrentWaypoint) == "function" then
                     _G.RXPTOMTOM_SetCurrentWaypoint()
                 end
+            end,
+        })
+        table.insert(menu, insertIndex + 1, {
+            text = "Open Waypoint Manager",
+            notCheckable = 1,
+            func = function()
+                if _G.RXPTOMTOM_Manager then _G.RXPTOMTOM_Manager:Toggle() end
             end,
         })
     end
@@ -567,9 +653,26 @@ tick = function()
         return
     end
 
+    ensureTomTomHook(tomtom)
+
     safeDisableRxpArrow()
 
     local now = GetTime()
+
+    if navigationPaused and now - lastNavigationCheck >= 0.25 then
+        lastNavigationCheck = now
+        if hasForeignWaypoints(tomtom) == false then
+            noForeignWaypointsSince = noForeignWaypointsSince or now
+            -- Let TomTom and managers finish removals and select their next target.
+            if now - noForeignWaypointsSince >= RESUME_DELAY then
+                navigationPaused = false
+                noForeignWaypointsSince = nil
+                restoreArrow = true
+            end
+        else
+            noForeignWaypointsSince = nil
+        end
+    end
 
     local element = arrowFrame.element
     local db = getConfig()
@@ -609,7 +712,13 @@ tick = function()
     currentStepKey = stepKey
 
     -- Avoid churn when the element hasn't materially changed.
-    if lastElementSignature and lastElementSignature == signature and currentWaypointUid and currentWaypointKey == elementKey then
+    if lastElementSignature and lastElementSignature == signature and currentWaypointUid
+        and currentWaypointKey == elementKey and isTomTomWaypointValid(tomtom, currentWaypointUid) then
+        if restoreArrow and not navigationPaused and type(tomtom.SetCrazyArrow) == "function" then
+            local arrivalDist = (tomtom.profile and tomtom.profile.arrow and tomtom.profile.arrow.arrival) or 0
+            pcall(tomtom.SetCrazyArrow, tomtom, currentWaypointUid, arrivalDist, currentWaypointUid.title)
+            restoreArrow = false
+        end
         return
     end
     local arrivalDist = (tomtom.profile and tomtom.profile.arrow and tomtom.profile.arrow.arrival) or 0
@@ -628,8 +737,9 @@ tick = function()
         currentWaypointKey = elementKey
         currentWaypointUid = uid
         lastElementSignature = signature
-        if type(tomtom.SetCrazyArrow) == "function" then
+        if not navigationPaused and type(tomtom.SetCrazyArrow) == "function" then
             pcall(tomtom.SetCrazyArrow, tomtom, uid, arrivalDist, uid.title)
+            restoreArrow = false
         end
     end
 end
@@ -674,9 +784,23 @@ frame:SetScript("OnEvent", function(_, event, arg1)
             minimapCheck:SetPoint("TOPLEFT", worldCheck, "BOTTOMLEFT", 0, -8)
             minimapCheck.Text:SetText("Show waypoint on minimap")
 
+            local managerBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+            managerBtn:SetSize(200, 22)
+            managerBtn:SetPoint("TOPLEFT", minimapCheck, "BOTTOMLEFT", 0, -12)
+            managerBtn:SetText("Open Waypoint Manager")
+            managerBtn:SetScript("OnClick", function()
+                if _G.RXPTOMTOM_Manager then _G.RXPTOMTOM_Manager:Toggle() end
+            end)
+
+            local resumeBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+            resumeBtn:SetSize(200, 22)
+            resumeBtn:SetPoint("TOPLEFT", managerBtn, "BOTTOMLEFT", 0, -8)
+            resumeBtn:SetText("Resume RXP navigation")
+            resumeBtn:SetScript("OnClick", setTomTomFromCurrentArrow)
+
             local reloadBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
             reloadBtn:SetSize(140, 22)
-            reloadBtn:SetPoint("TOPLEFT", minimapCheck, "BOTTOMLEFT", 0, -12)
+            reloadBtn:SetPoint("TOPLEFT", resumeBtn, "BOTTOMLEFT", 0, -12)
             reloadBtn:SetText("Reload to apply")
 
             -- Sync checkboxes from saved variables when opened.
@@ -721,6 +845,8 @@ frame:SetScript("OnEvent", function(_, event, arg1)
             if type(Settings) == "table" and type(Settings.RegisterCanvasLayoutCategory) == "function" then
                 local category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
                 Settings.RegisterAddOnCategory(category)
+                panel.categoryID = category:GetID()
+                panel.category = category
             elseif type(InterfaceOptions_AddCategory) == "function" then
                 InterfaceOptions_AddCategory(panel)
             elseif type(InterfaceOptionsFrameAddCategory) == "function" then
@@ -728,19 +854,26 @@ frame:SetScript("OnEvent", function(_, event, arg1)
             end
 
             _G.RXPTOMTOM_OptionsPanel = panel
+            if _G.RXPTOMTOM_Manager then _G.RXPTOMTOM_Manager:CreateSettings(panel) end
         end
 
         createOptionsPanel()
 
-        -- Slash command: /rxptomtom [options|debug|clear]
+        if _G.RXPTOMTOM_Manager then _G.RXPTOMTOM_Manager:Initialize() end
+
+        -- Slash command: /rxptomtom [manager|options|debug|clear]
         SLASH_RXPTOMTOM1 = "/rxptomtom"
-        SlashCmdList.RXPTOMTOM = function(msg)
-            msg = (msg or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
-            if msg == "options" or msg == "opt" then
+        SlashCmdList.RXPTOMTOM = function(command)
+            command = (command or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+            if command == "manager" then
+                if _G.RXPTOMTOM_Manager then _G.RXPTOMTOM_Manager:Toggle() end
+                return
+            end
+            if command == "options" or command == "opt" then
                 local panel = _G.RXPTOMTOM_OptionsPanel
                 if panel then
                     if type(Settings) == "table" and type(Settings.OpenToCategory) == "function" then
-                        Settings.OpenToCategory(panel.name)
+                        Settings.OpenToCategory(panel.categoryID or panel.name)
                     elseif type(InterfaceOptionsFrame_OpenToCategory) == "function" then
                         InterfaceOptionsFrame_OpenToCategory(panel)
                         InterfaceOptionsFrame_OpenToCategory(panel)
@@ -748,12 +881,12 @@ frame:SetScript("OnEvent", function(_, event, arg1)
                 end
                 return
             end
-            if msg == "debug" then
+            if command == "debug" then
                 debugEnabled = not debugEnabled
                 dbg("Debug %s", debugEnabled and "enabled" or "disabled")
                 return
             end
-            if msg == "clear" then
+            if command == "clear" then
                 local tt = ensureTomTom()
                 if tt then
                     clearTomTomWaypoints(tt)
@@ -782,16 +915,14 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         end
         msg("For the best experience, make sure to keep your RestedXP Guides up to date.")
 
-        -- Fallback polling until we successfully hook DrawArrow.
+        -- Also observe removals while RXP's target stays unchanged or DrawArrow is idle.
         frame:SetScript("OnUpdate", function(_, elapsed)
-            if rxpHooked then
-                return
-            end
             frame._t = (frame._t or 0) + elapsed
             if frame._t < 0.25 then
                 return
             end
             frame._t = 0
+            if _G.RXPTOMTOM_Manager then _G.RXPTOMTOM_Manager:Update() end
             tick()
         end)
 
