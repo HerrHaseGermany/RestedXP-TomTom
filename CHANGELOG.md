@@ -1,6 +1,6 @@
 ## CHANGELOG
 
-# 1.4
+# 1.5
 - Add a compact 300 × 350 Waypoint Manager with three visible rows, add/go/trash controls, saved drag-and-drop ordering, and route start/stop controls.
 - Allow targets below the RXP entry so routes can wait for the guide step to complete before continuing.
 - Automatically advance after removing the active target; add "Clear & RXP" to remove all targets and resume the current guide target.
